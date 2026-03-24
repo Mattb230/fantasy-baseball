@@ -54,8 +54,12 @@ if not ESPN_S2 or not SWID:
 # ─────────────────────────────────────────────────────────────────────────────
 
 READ_BASE  = f"https://lm-api-reads.fantasy.espn.com/apis/v3/games/flb/seasons/{SEASON}"
-WRITE_BASE = f"https://fantasy.espn.com/apis/v3/games/flb/seasons/{SEASON}"
+WRITE_BASE = f"https://lm-api-writes.fantasy.espn.com/apis/v3/games/flb/seasons/{SEASON}"
 COOKIES    = {"espn_s2": ESPN_S2, "SWID": SWID}
+
+# ESPN build hash required by the write API — update if transactions start failing.
+# Captured from browser network traffic on 2026-03-24.
+ESPN_PLATFORM_VERSION = "c596c1a1951ccecaa3c8993e4ae216b6549a51ca"
 
 SLOT_SP = 13
 SLOT_RP = 14
@@ -133,20 +137,23 @@ def get_session():
 
 def get_league_info(session):
     """
-    Return (scoring_period_id, slot_counts) where slot_counts maps
-    ESPN slot ID (int) → number of active slots of that type in the league.
-    E.g. {13: 7, 14: 0, 15: 0, 16: 5, 17: 2} for a league with 7 SP slots.
+    Return (scoring_period_id, latest_scoring_period, slot_counts) where:
+      scoring_period_id    — current active scoring period
+      latest_scoring_period — highest period the API will accept lineup submissions for
+      slot_counts          — ESPN slot ID (int) → number of active slots of that type
+    E.g. slot_counts {13: 7, 14: 0, 15: 0, 16: 5, 17: 2} for a league with 7 SP slots.
     """
     url  = f"{READ_BASE}/segments/0/leagues/{LEAGUE_ID}/"
     resp = session.get(url, params={"view": "mSettings"}, timeout=30)
     resp.raise_for_status()
     data = resp.json()
-    scoring_period = data.get("scoringPeriodId", 0)
+    scoring_period  = data.get("scoringPeriodId", 0)
+    latest_period   = data.get("status", {}).get("latestScoringPeriod", scoring_period)
     raw = (data.get("settings", {})
                .get("rosterSettings", {})
                .get("lineupSlotCounts", {}))
     slot_counts = {int(k): int(v) for k, v in raw.items()}
-    return scoring_period, slot_counts
+    return scoring_period, latest_period, slot_counts
 
 
 def get_roster(session, scoring_period_id, debug=False):
@@ -191,17 +198,27 @@ def _debug_print_entries(entries, scoring_period_id, schedule=None, probable_sta
         )
 
 
-def submit_lineup(session, items, scoring_period_id, debug=False):
-    """POST a lineup adjustment to ESPN."""
-    url  = f"{WRITE_BASE}/segments/0/leagues/{LEAGUE_ID}/transactions/"
+def submit_lineup(session, items, scoring_period_id, today_period, debug=False):
+    """POST a lineup adjustment to ESPN.
+
+    Current scoring periods use type=LINEUP_ADJUSTMENT.
+    Future scoring periods use type=FUTURE_ROSTER with memberId + executionType,
+    matching the format captured from ESPN's browser client.
+    """
+    url       = f"{WRITE_BASE}/segments/0/leagues/{LEAGUE_ID}/transactions/"
+    is_future = scoring_period_id > today_period
+
     body = {
         "isLeagueManager": False,
         "scoringPeriodId": scoring_period_id,
         "teamId":          MY_TEAM_ID,
-        "type":            "LINEUP_ADJUSTMENT",
+        "type":            "FUTURE_ROSTER" if is_future else "LINEUP_ADJUSTMENT",
         "items": [
             {
                 "fromLineupSlotId": item["fromLineupSlotId"],
+                "fromTeamId":       0,
+                "isKeeper":         False,
+                "overallPickNumber": 0,
                 "playerId":         item["playerId"],
                 "toLineupSlotId":   item["toLineupSlotId"],
                 "type":             "LINEUP",
@@ -209,25 +226,43 @@ def submit_lineup(session, items, scoring_period_id, debug=False):
             for item in items
         ],
     }
-    # ESPN's fantasy.espn.com write endpoint requires browser-like headers to
-    # route the request to the API layer rather than the HTML frontend.
+    if is_future:
+        body["memberId"]      = SWID
+        body["executionType"] = "EXECUTE"
+
     write_headers = {
-        "Origin":  "https://fantasy.espn.com",
-        "Referer": f"https://fantasy.espn.com/baseball/team?leagueId={LEAGUE_ID}&teamId={MY_TEAM_ID}",
-        "X-Fantasy-Source":   "kona",
-        "X-Fantasy-Platform": "kona-PROD-1.4.4-branch-24-01-01",
+        "Origin":           "https://fantasy.espn.com",
+        "Referer":          "https://fantasy.espn.com/",
+        "x-fantasy-source": "kona",
+        "x-fantasy-platform": "espn-fantasy-web",
     }
     if debug:
-        print(f"\n  DEBUG: POST {url}")
+        print(f"\n  DEBUG: POST {url}?platformVersion={ESPN_PLATFORM_VERSION}")
         print(f"  DEBUG: Request body: {json.dumps(body, indent=4)}")
-    resp = session.post(url, json=body, headers=write_headers, timeout=30)
+    resp = session.post(
+        url,
+        params={"platformVersion": ESPN_PLATFORM_VERSION},
+        json=body,
+        headers=write_headers,
+        cookies={"espn_s2": ESPN_S2, "SWID": SWID},
+        timeout=30,
+    )
     if debug:
         print(f"  DEBUG: Response status: {resp.status_code}")
+        if resp.history:
+            print(f"  DEBUG: Redirects ({len(resp.history)}):")
+            for r in resp.history:
+                print(f"    {r.status_code} {r.url} → {r.headers.get('Location', '?')}")
         try:
             print(f"  DEBUG: Response body: {json.dumps(resp.json(), indent=4)}")
         except Exception:
             print(f"  DEBUG: Response text: {resp.text[:500]}")
     resp.raise_for_status()
+    if "text/html" in resp.headers.get("Content-Type", ""):
+        raise ValueError(
+            "Write endpoint returned HTML instead of JSON — credentials may be "
+            "invalid or the request was not routed to the API."
+        )
     return resp
 
 
@@ -428,6 +463,7 @@ def optimize_pitchers(entries, scoring_period_id, schedule=None, probable_starte
 
     # ── Resting SPs: stay put unless their slot was consumed above ────────────
     # Only bench a resting SP if a higher-priority player displaced them.
+    # Resting SPs already on the bench stay benched.
     for e in sps_resting:
         slot = current_slot(e)
         if slot in cap and cap[slot] > 0:
@@ -438,6 +474,10 @@ def optimize_pitchers(entries, scoring_period_id, schedule=None, probable_starte
 
     # Skipped SPs (threshold exceeded) → bench
     for e in skipped_sps:
+        desired[player_id(e)] = SLOT_BE
+
+    # Players who couldn't fit in any active slot → bench
+    for e in no_slot:
         desired[player_id(e)] = SLOT_BE
 
     all_pitchers = rps + sps_starting + sps_resting + skipped_sps
@@ -502,14 +542,14 @@ def main():
 
     print("Fetching league info...")
     try:
-        today_period, slot_counts = get_league_info(session)
+        today_period, latest_period, slot_counts = get_league_info(session)
     except Exception as e:
         print(f"ERROR fetching league info: {e}")
         sys.exit(1)
     num_sp = slot_counts.get(SLOT_SP, 0)
     num_rp = slot_counts.get(SLOT_RP, 0)
     num_p  = slot_counts.get(SLOT_P,  0)
-    print(f"  Today = scoring period {today_period}")
+    print(f"  Today = scoring period {today_period}  (submittable up to period {latest_period})")
     if slot_counts:
         print(f"  Active pitcher slots: {num_sp} SP, {num_rp} RP, {num_p} P")
     else:
@@ -530,10 +570,11 @@ def main():
 
     for day_offset in range(args.days):
         scoring_period = today_period + day_offset
+        date_label     = (base_date + datetime.timedelta(days=day_offset)).strftime("%Y-%m-%d")
         label = "Today" if day_offset == 0 else f"Day +{day_offset}"
 
         print(f"{'─' * 60}")
-        print(f"  {label}  (scoring period {scoring_period})")
+        print(f"  {label}  (scoring period {scoring_period}, {date_label})")
         print(f"{'─' * 60}")
 
         # Fetch roster
@@ -599,7 +640,7 @@ def main():
                 print("\n  (Dry run — not submitted)")
             else:
                 try:
-                    submit_lineup(session, moves, scoring_period, debug=args.debug)
+                    submit_lineup(session, moves, scoring_period, today_period, debug=args.debug)
                     print(f"\n  ✓ Lineup submitted for scoring period {scoring_period}.")
                 except requests.HTTPError as e:
                     print(f"\n  ERROR submitting lineup: {e}")
