@@ -1,0 +1,16 @@
+# Credentials — never commit
+.env
+
+# Debug output
+debug_*.json
+debug_raw_player.json
+
+# Player data exports
+players_*.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
