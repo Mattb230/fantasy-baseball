@@ -8,6 +8,7 @@ Python scripts to automate ESPN Fantasy Baseball lineup management and player da
 |---|---|
 | `espn_lineup.py` | Automatically optimizes your pitcher lineup for today and future days |
 | `espn_players.py` | Pulls all player stats and ownership data to a JSON file |
+| `test_espn_lineup.py` | Unit tests for the lineup optimizer logic |
 
 ## Setup
 
@@ -55,6 +56,12 @@ python espn_players.py
 ```
 
 Outputs `players_YYYY-MM-DD.json` with stats, ownership %, and roster status for all players.
+
+### Tests
+
+```bash
+python -m pytest test_espn_lineup.py -v
+```
 
 ## Configuration
 

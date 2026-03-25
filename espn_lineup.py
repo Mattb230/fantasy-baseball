@@ -46,11 +46,7 @@ ESPN_S2 = os.environ.get("ESPN_S2", "")
 SWID    = os.environ.get("SWID",    "")
 ESPN_S2 = unquote(ESPN_S2)
 SWID    = unquote(SWID)
-
-if not ESPN_S2 or not SWID:
-    print("ERROR: ESPN_S2 and SWID credentials not found.")
-    print("  Set them in this file or via environment variables.")
-    sys.exit(1)
+# Credential validation happens in main() so this module can be imported by tests.
 # ─────────────────────────────────────────────────────────────────────────────
 
 READ_BASE  = f"https://lm-api-reads.fantasy.espn.com/apis/v3/games/flb/seasons/{SEASON}"
@@ -563,6 +559,14 @@ def main():
 
     if args.days < 1:
         parser.error("--days must be at least 1")
+
+    if not ESPN_S2 or not SWID:
+        print(
+            "ERROR: ESPN_S2 and SWID credentials must be set.\n"
+            "  Copy .env.example to .env and fill in your values,\n"
+            "  or export ESPN_S2 and SWID as environment variables."
+        )
+        sys.exit(1)
 
     if args.dry_run:
         print("DRY RUN — no changes will be submitted.\n")
