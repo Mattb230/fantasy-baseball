@@ -269,17 +269,21 @@ def submit_lineup(session, items, scoring_period_id, today_period, debug=False):
 def build_schedule_lookup(today_period, base_date, num_days, debug=False):
     """
     Fetch the MLB game schedule (with probable pitchers) from the public MLB Stats API
-    for [base_date, base_date + num_days - 1] and return:
+    and return:
 
         schedule          — {scoring_period_id: set of ESPN proTeamIds playing that day}
-                            Used to determine whether any team has a game (e.g. for RPs).
         probable_starters — {scoring_period_id: set of lowercased probable starter names}
-                            Used to determine whether a specific SP is actually scheduled
-                            to start that day.
+        base_date         — calibrated date for scoring period today_period (may differ
+                            from the passed-in base_date if ESPN's period 1 starts
+                            tomorrow rather than today)
 
-    Uses statsapi.mlb.com — no authentication required.
+    ESPN's scoring period 1 corresponds to the first game day of the season, which may
+    be tomorrow if today is the day before the season opens. We detect this and adjust
+    base_date so that period numbers align with what ESPN's UI shows.
     """
-    end_date = base_date + datetime.timedelta(days=num_days - 1)
+    # Fetch one extra day at the end so that a base_date shift doesn't drop the
+    # last requested day from coverage.
+    end_date = base_date + datetime.timedelta(days=num_days)
     resp = requests.get(
         "https://statsapi.mlb.com/api/v1/schedule",
         params={
@@ -292,13 +296,38 @@ def build_schedule_lookup(today_period, base_date, num_days, debug=False):
         timeout=30,
     )
     resp.raise_for_status()
+    dates_data = resp.json().get("dates", [])
+
+    # ── Period-to-date calibration (pre-opening-day only) ────────────────────
+    # REMOVE THIS BLOCK after the 2026 season is underway (after 2026-03-25).
+    # Context: on 2026-03-24 (the day before opening day), ESPN's scoring period 1
+    # corresponds to 2026-03-25 (first game day), not today. Without this fix the
+    # period-to-date mapping is off by one day.
+    # This triggers only when today_period == 1 AND today has no games, so it is
+    # harmless during the regular season (today always has games when period == 1).
+    if today_period == 1:
+        dates_with_games = {
+            datetime.datetime.strptime(gd["date"], "%Y-%m-%d").date()
+            for gd in dates_data
+            if gd.get("games")
+        }
+        if base_date not in dates_with_games and dates_with_games:
+            first_game_date = min(dates_with_games)
+            if first_game_date > base_date:
+                if debug:
+                    print(f"  DEBUG: No games on {base_date}; calibrating base_date "
+                          f"to first game day {first_game_date} to match ESPN period numbering.")
+                base_date = first_game_date
+    # ── END pre-opening-day calibration ──────────────────────────────────────
 
     schedule          = {}   # scoring_period_id -> set of ESPN proTeamIds
     probable_starters = {}   # scoring_period_id -> set of lowercased pitcher names
 
-    for game_date in resp.json().get("dates", []):
+    for game_date in dates_data:
         d      = datetime.datetime.strptime(game_date["date"], "%Y-%m-%d").date()
         period = today_period + (d - base_date).days
+        if period < today_period:
+            continue  # skip dates before the (possibly adjusted) base_date
         playing  = set()
         starters = set()
 
@@ -325,7 +354,7 @@ def build_schedule_lookup(today_period, base_date, num_days, debug=False):
             print(f"    Period {period} ({d}): {len(schedule[period])} teams playing, "
                   f"probable starters: {sorted(probable_starters.get(period, set()))}")
 
-    return schedule, probable_starters
+    return schedule, probable_starters, base_date
 
 
 # ── Roster helpers ────────────────────────────────────────────────────────────
@@ -558,7 +587,7 @@ def main():
     base_date = datetime.date.today()
     print("Fetching MLB game schedule and probable starters...")
     try:
-        schedule, probable_starters = build_schedule_lookup(
+        schedule, probable_starters, base_date = build_schedule_lookup(
             today_period, base_date, args.days, debug=args.debug
         )
         print(f"  Loaded schedule for {len(schedule)} days.\n")
