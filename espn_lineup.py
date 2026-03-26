@@ -601,9 +601,13 @@ def main():
         schedule          = None
         probable_starters = None
 
+    total_starts  = 0
+    sunday_starts = 0
+
     for day_offset in range(args.days):
         scoring_period = today_period + day_offset
-        date_label     = (base_date + datetime.timedelta(days=day_offset)).strftime("%Y-%m-%d")
+        day_date       = base_date + datetime.timedelta(days=day_offset)
+        date_label     = day_date.strftime("%Y-%m-%d")
         label = "Today" if day_offset == 0 else f"Day +{day_offset}"
 
         print(f"{'─' * 60}")
@@ -623,6 +627,10 @@ def main():
         rps          = [e for e in non_il if is_rp(e)]
         sps_starting = [e for e in non_il if is_sp(e) and has_start(e, scoring_period, probable_starters)]
         sps_resting  = [e for e in non_il if is_sp(e) and not has_start(e, scoring_period, probable_starters)]
+
+        total_starts  += len(sps_starting)
+        if day_date.weekday() == 6:  # Sunday
+            sunday_starts += len(sps_starting)
 
         print(f"  SPs with start ({len(sps_starting)}): "
               f"{[player_name(e) for e in sps_starting]}")
@@ -686,6 +694,12 @@ def main():
 
         if day_offset < args.days - 1:
             time.sleep(0.5)
+
+    print(f"{'═' * 60}")
+    print(f"  Period summary ({args.days} day{'s' if args.days != 1 else ''})")
+    print(f"    Total pitcher starts: {total_starts}")
+    print(f"    Starts on Sundays:    {sunday_starts}")
+    print(f"{'═' * 60}")
 
 
 if __name__ == "__main__":
