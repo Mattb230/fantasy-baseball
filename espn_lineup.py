@@ -269,16 +269,8 @@ def build_schedule_lookup(today_period, base_date, num_days, debug=False):
 
         schedule          — {scoring_period_id: set of ESPN proTeamIds playing that day}
         probable_starters — {scoring_period_id: set of lowercased probable starter names}
-        base_date         — calibrated date for scoring period today_period (may differ
-                            from the passed-in base_date if ESPN's period 1 starts
-                            tomorrow rather than today)
-
-    ESPN's scoring period 1 corresponds to the first game day of the season, which may
-    be tomorrow if today is the day before the season opens. We detect this and adjust
-    base_date so that period numbers align with what ESPN's UI shows.
+        base_date         — date for scoring period today_period (unchanged from input)
     """
-    # Fetch one extra day at the end so that a base_date shift doesn't drop the
-    # last requested day from coverage.
     end_date = base_date + datetime.timedelta(days=num_days)
     resp = requests.get(
         "https://statsapi.mlb.com/api/v1/schedule",
@@ -294,28 +286,6 @@ def build_schedule_lookup(today_period, base_date, num_days, debug=False):
     resp.raise_for_status()
     dates_data = resp.json().get("dates", [])
 
-    # ── Period-to-date calibration (pre-opening-day only) ────────────────────
-    # REMOVE THIS BLOCK after the 2026 season is underway (after 2026-03-25).
-    # Context: on 2026-03-24 (the day before opening day), ESPN's scoring period 1
-    # corresponds to 2026-03-25 (first game day), not today. Without this fix the
-    # period-to-date mapping is off by one day.
-    # This triggers only when today_period == 1 AND today has no games, so it is
-    # harmless during the regular season (today always has games when period == 1).
-    if today_period == 1:
-        dates_with_games = {
-            datetime.datetime.strptime(gd["date"], "%Y-%m-%d").date()
-            for gd in dates_data
-            if gd.get("games")
-        }
-        if base_date not in dates_with_games and dates_with_games:
-            first_game_date = min(dates_with_games)
-            if first_game_date > base_date:
-                if debug:
-                    print(f"  DEBUG: No games on {base_date}; calibrating base_date "
-                          f"to first game day {first_game_date} to match ESPN period numbering.")
-                base_date = first_game_date
-    # ── END pre-opening-day calibration ──────────────────────────────────────
-
     schedule          = {}   # scoring_period_id -> set of ESPN proTeamIds
     probable_starters = {}   # scoring_period_id -> set of lowercased pitcher names
 
@@ -323,7 +293,7 @@ def build_schedule_lookup(today_period, base_date, num_days, debug=False):
         d      = datetime.datetime.strptime(game_date["date"], "%Y-%m-%d").date()
         period = today_period + (d - base_date).days
         if period < today_period:
-            continue  # skip dates before the (possibly adjusted) base_date
+            continue
         playing  = set()
         starters = set()
 
@@ -606,12 +576,17 @@ def main():
 
     for day_offset in range(args.days):
         scoring_period = today_period + day_offset
-        day_date       = base_date + datetime.timedelta(days=day_offset)
-        date_label     = day_date.strftime("%Y-%m-%d")
-        label = "Today" if day_offset == 0 else f"Day +{day_offset}"
+        day_date = base_date + datetime.timedelta(days=day_offset)
+        label    = "Today" if day_offset == 0 else f"Day +{day_offset}"
+
+        if day_offset == 0:
+            header = f"Today  (scoring period {scoring_period})" if args.debug else "Today"
+        else:
+            date_label = day_date.strftime("%A, %B %-d")
+            header = f"{date_label}  ({label}, scoring period {scoring_period})" if args.debug else date_label
 
         print(f"{'─' * 60}")
-        print(f"  {label}  (scoring period {scoring_period}, {date_label})")
+        print(f"  {header}")
         print(f"{'─' * 60}")
 
         # Fetch roster
