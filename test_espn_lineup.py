@@ -104,6 +104,37 @@ class TestHasStart(unittest.TestCase):
         e = make_sp("Gerrit Cole")
         self.assertFalse(el.has_start(e, 1, {}))
 
+    # ESPN PP fallback tests
+
+    def _add_espn_probable(self, entry):
+        """Add ESPN starterStatusByProGame PROBABLE flag to a test entry."""
+        entry["playerPoolEntry"]["player"]["starterStatusByProGame"] = {"401999999": "PROBABLE"}
+        return entry
+
+    def test_espn_fallback_when_no_mlb_data(self):
+        """ESPN PP flag used when MLB Stats API has no starters and game_period_map confirms the game."""
+        e = self._add_espn_probable(make_sp("Gerrit Cole", pro_team_id=5))
+        # game_period_map says game 401999999 is on period 8
+        self.assertTrue(el.has_start(e, 8, {}, game_period_map={"401999999": 8}))
+
+    def test_espn_fallback_wrong_period_in_map(self):
+        """ESPN PP flag ignored if the player's PROBABLE game is mapped to a different period."""
+        e = self._add_espn_probable(make_sp("Gerrit Cole", pro_team_id=5))
+        # game_period_map says game 401999999 is on period 9, not 8
+        self.assertFalse(el.has_start(e, 8, {}, game_period_map={"401999999": 9}))
+
+    def test_espn_fallback_not_used_when_mlb_has_data(self):
+        """ESPN PP flag does not fire when MLB Stats API has data for the period."""
+        e = self._add_espn_probable(make_sp("Gerrit Cole", pro_team_id=5))
+        # MLB has starters for period 8, but Gerrit Cole is not among them
+        self.assertFalse(el.has_start(e, 8, {8: {"shane bieber"}},
+                                      game_period_map={"401999999": 8}))
+
+    def test_espn_fallback_empty_map(self):
+        """ESPN PP flag not used when game_period_map is empty (view unavailable)."""
+        e = self._add_espn_probable(make_sp("Gerrit Cole", pro_team_id=5))
+        self.assertFalse(el.has_start(e, 8, {}, game_period_map={}))
+
 
 # ── TestOptimizePitchers ──────────────────────────────────────────────────────
 

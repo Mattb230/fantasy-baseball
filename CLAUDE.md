@@ -6,10 +6,11 @@ Scripts to automate ESPN Fantasy Baseball lineup management and player data pull
 
 | File | Purpose |
 |---|---|
-| `espn_lineup.py` | **Primary optimizer.** Manages pitcher lineup slots for today and future days using MLB Stats API for probable starters. |
+| `espn_lineup.py` | **Primary optimizer.** Manages pitcher lineup slots for today and future days using MLB Stats API for probable starters, with ESPN PP badge data as a fallback for days beyond the MLB window. |
 | `espn_players.py` | Pulls all players + stats to a dated JSON file (`players_YYYY-MM-DD.json`). |
 | `espn_roster.py` | Older/simpler pitcher optimizer. Uses ESPN's embedded game schedule data rather than MLB Stats API. |
-| `test_espn_lineup.py` | Unit tests for optimizer logic (role detection, start detection, move generation, schedule calibration). |
+| `test_espn_lineup.py` | Unit tests for optimizer logic (role detection, start detection, move generation). |
+| `test_espn_lineup_integration.py` | Integration tests — hit the real ESPN/MLB APIs (require credentials, no writes). |
 
 ## Running
 
@@ -19,7 +20,8 @@ python espn_lineup.py --dry-run        # preview without submitting
 python espn_lineup.py --days 3         # today + 2 more days
 python espn_lineup.py --debug          # dump raw JSON to debug_*.json
 
-python -m pytest test_espn_lineup.py -v   # run optimizer unit tests
+python -m pytest test_espn_lineup.py -v                 # unit tests (no network)
+python -m pytest test_espn_lineup_integration.py -v     # integration tests (requires credentials)
 
 python espn_players.py                 # interactive: pulls all players to JSON
 python espn_roster.py                  # interactive: older roster optimizer
@@ -46,8 +48,16 @@ SWID={your-swid-guid}
 - **ESPN private API** — authenticated via browser cookie pair (`espn_s2` + `SWID`)
   - Read endpoint: `lm-api-reads.fantasy.espn.com/apis/v3/games/flb/...`
   - Write endpoint: `lm-api-writes.fantasy.espn.com/apis/v3/games/flb/...`
-- **MLB Stats API** (`statsapi.mlb.com`) — public, no auth; used for game schedules and probable starters
+- **MLB Stats API** (`statsapi.mlb.com`) — public, no auth; used for game schedules and probable starters (primary source, typically reliable ~2 days out)
+- **ESPN public scoreboard API** (`site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard`) — public, no auth; used to build an ESPN game ID → scoring period map, enabling the PP fallback for days beyond the MLB Stats API window
 - `ESPN_TO_MLB_TEAM` / `MLB_TO_ESPN_TEAM` in `espn_lineup.py` maps between the two team ID systems
+
+### Probable starter detection
+
+Start detection uses two sources in priority order:
+
+1. **MLB Stats API** (`probablePitcher` hydration) — primary; used when pitcher names are announced
+2. **ESPN PP badge** (`starterStatusByProGame` field in roster data) — fallback; used when MLB has no announced starters for a period. Cross-referenced against the ESPN scoreboard game ID map to avoid false positives (the field lists all future PROBABLE games globally, not just the target day)
 
 ### ESPN Write API notes
 

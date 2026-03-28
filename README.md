@@ -6,9 +6,10 @@ Python scripts to automate ESPN Fantasy Baseball lineup management and player da
 
 | Script | Description |
 |---|---|
-| `espn_lineup.py` | Automatically optimizes your pitcher lineup for today and future days |
+| `espn_lineup.py` | Automatically optimizes your pitcher lineup for today and future days. Uses MLB Stats API for probable starters, with ESPN PP badge data as a fallback for days further out. |
 | `espn_players.py` | Pulls all player stats and ownership data to a JSON file |
 | `test_espn_lineup.py` | Unit tests for the lineup optimizer logic |
+| `test_espn_lineup_integration.py` | Integration tests — hit the real ESPN/MLB APIs (require credentials) |
 
 ## Setup
 
@@ -60,7 +61,8 @@ Outputs `players_YYYY-MM-DD.json` with stats, ownership %, and roster status for
 ### Tests
 
 ```bash
-python -m pytest test_espn_lineup.py -v
+python -m pytest test_espn_lineup.py -v                  # unit tests (no network)
+python -m pytest test_espn_lineup_integration.py -v      # integration tests (requires credentials)
 ```
 
 ## Configuration
@@ -72,3 +74,10 @@ LEAGUE_ID  = "your_league_id"   # from your league's URL
 SEASON     = 2026
 MY_TEAM_ID = 5                  # your ESPN team ID
 ```
+
+## How probable starter detection works
+
+`espn_lineup.py` uses two data sources in priority order:
+
+1. **MLB Stats API** — primary source; provides confirmed probable pitchers ~1–2 days out
+2. **ESPN PP badge** — fallback for days beyond the MLB window; reads `starterStatusByProGame` from the roster API and cross-references it against ESPN's public MLB scoreboard to confirm which day each flagged game falls on

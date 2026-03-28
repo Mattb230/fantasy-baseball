@@ -152,6 +152,37 @@ def get_league_info(session):
     return scoring_period, latest_period, slot_counts
 
 
+def build_espn_game_period_map(today_period, base_date, num_days, debug=False):
+    """
+    Build a mapping of ESPN game IDs to scoring periods by querying the public
+    ESPN MLB scoreboard API for each date in the requested range.
+
+    Returns {espn_game_id_str: scoring_period_int}.
+    Returns {} on failure, which safely disables the ESPN PP fallback.
+    """
+    game_to_period = {}
+    for offset in range(num_days + 1):
+        d      = base_date + datetime.timedelta(days=offset)
+        period = today_period + offset
+        try:
+            resp = requests.get(
+                "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard",
+                params={"dates": d.strftime("%Y%m%d")},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            for event in resp.json().get("events", []):
+                game_to_period[str(event["id"])] = period
+        except Exception:
+            continue   # skip dates that fail; partial map is still useful
+
+    if debug:
+        print(f"  DEBUG: ESPN game→period map: {len(game_to_period)} games across "
+              f"{num_days + 1} days")
+
+    return game_to_period
+
+
 def get_roster(session, scoring_period_id, debug=False):
     """Fetch my team's roster entries for the given scoring period."""
     url  = f"{READ_BASE}/segments/0/leagues/{LEAGUE_ID}/"
@@ -177,7 +208,7 @@ def get_roster(session, scoring_period_id, debug=False):
     raise ValueError(f"Team {MY_TEAM_ID} not found in league response.")
 
 
-def _debug_print_entries(entries, scoring_period_id, schedule=None, probable_starters=None):
+def _debug_print_entries(entries, scoring_period_id, schedule=None, probable_starters=None, game_period_map=None):
     """Print key fields for every roster entry to diagnose parsing issues."""
     print(f"\n  DEBUG: {len(entries)} roster entries for scoring period {scoring_period_id}")
     for e in entries:
@@ -187,7 +218,7 @@ def _debug_print_entries(entries, scoring_period_id, schedule=None, probable_sta
         tid     = pro_team_id(e)
         sp_flag = "SP" if is_sp(e) else ("RP" if is_rp(e) else "--")
         game    = has_game(e, scoring_period_id, schedule) if schedule else "?"
-        start   = has_start(e, scoring_period_id, probable_starters) if probable_starters else "?"
+        start   = has_start(e, scoring_period_id, probable_starters, schedule, game_period_map)
         print(
             f"    {name:30s}  lineupSlot={slot:2d}  role={sp_flag}  "
             f"proTeam={tid}  hasGame={game}  hasStart={start}  eligibleSlots={slots}"
@@ -372,22 +403,54 @@ def has_game(entry, scoring_period_id, schedule=None):
     return str(scoring_period_id) in games and len(games[str(scoring_period_id)]) > 0
 
 
-def has_start(entry, scoring_period_id, probable_starters):
+def is_espn_probable(entry, period_game_ids):
+    """
+    True if ESPN marks this player as a probable pitcher for a game that falls
+    in the given scoring period.  period_game_ids is the set of ESPN game ID
+    strings that belong to the target period (from build_espn_game_period_map).
+    """
+    status = (entry.get("playerPoolEntry", {})
+                   .get("player", {})
+                   .get("starterStatusByProGame", {}))
+    return any(gid in period_game_ids and v == "PROBABLE"
+               for gid, v in status.items())
+
+
+def has_start(entry, scoring_period_id, probable_starters,
+              schedule=None, game_period_map=None):
     """
     True if this player is the probable starting pitcher for a game in the given
-    scoring period.  probable_starters: {scoring_period_id: set of lowercased names}.
-    Falls back to False (never a false positive) if probable_starters is None/empty.
+    scoring period.
+
+    Primary source: probable_starters {scoring_period_id: set of lowercased names}
+    from the MLB Stats API.
+
+    Fallback: if MLB Stats API has no probable starters announced for this period,
+    uses ESPN's starterStatusByProGame PP indicator cross-referenced against the
+    ESPN game ID → scoring period map (game_period_map).  Falls back to False
+    if game_period_map is empty or unavailable (safe default, no false positives).
     """
-    if not probable_starters:
-        return False
     name = player_name(entry).lower()
-    return name in probable_starters.get(scoring_period_id, set())
+
+    # Primary: MLB Stats API
+    if probable_starters and name in probable_starters.get(scoring_period_id, set()):
+        return True
+
+    # Fallback: ESPN PP indicator, only when MLB has no data for this period
+    if not probable_starters or not probable_starters.get(scoring_period_id):
+        if game_period_map:
+            period_game_ids = {gid for gid, p in game_period_map.items()
+                               if p == scoring_period_id}
+            if period_game_ids:
+                return is_espn_probable(entry, period_game_ids)
+
+    return False
 
 
 # ── Optimizer ─────────────────────────────────────────────────────────────────
 
 def optimize_pitchers(entries, scoring_period_id, schedule=None, probable_starters=None,
-                      slot_counts=None):
+                      slot_counts=None, game_period_map=None):
     """
     Compute the minimal set of lineup moves to satisfy all priority rules.
 
@@ -405,8 +468,8 @@ def optimize_pitchers(entries, scoring_period_id, schedule=None, probable_starte
     non_il = [e for e in entries if current_slot(e) != SLOT_IL]
 
     rps          = [e for e in non_il if is_rp(e)]
-    sps_starting = [e for e in non_il if is_sp(e) and has_start(e, scoring_period_id, probable_starters)]
-    sps_resting  = [e for e in non_il if is_sp(e) and not has_start(e, scoring_period_id, probable_starters)]
+    sps_starting = [e for e in non_il if is_sp(e) and has_start(e, scoring_period_id, probable_starters, schedule, game_period_map)]
+    sps_resting  = [e for e in non_il if is_sp(e) and not has_start(e, scoring_period_id, probable_starters, schedule, game_period_map)]
 
     # Slot capacity: use league config when available; fall back to current occupancy
     if slot_counts:
@@ -571,6 +634,19 @@ def main():
         schedule          = None
         probable_starters = None
 
+    print("Fetching ESPN scoreboard for PP fallback...")
+    try:
+        game_period_map = build_espn_game_period_map(
+            today_period, base_date, args.days, debug=args.debug
+        )
+        if game_period_map:
+            print(f"  ESPN game→period map loaded ({len(game_period_map)} games).\n")
+        else:
+            print("  WARNING: ESPN scoreboard returned no games; PP fallback disabled.\n")
+    except Exception as e:
+        print(f"  WARNING: Could not fetch ESPN scoreboard ({e}). PP fallback disabled.\n")
+        game_period_map = {}
+
     total_starts  = 0
     sunday_starts = 0
 
@@ -600,8 +676,8 @@ def main():
         # Log pitcher inventory for this day
         non_il       = [e for e in entries if current_slot(e) != SLOT_IL]
         rps          = [e for e in non_il if is_rp(e)]
-        sps_starting = [e for e in non_il if is_sp(e) and has_start(e, scoring_period, probable_starters)]
-        sps_resting  = [e for e in non_il if is_sp(e) and not has_start(e, scoring_period, probable_starters)]
+        sps_starting = [e for e in non_il if is_sp(e) and has_start(e, scoring_period, probable_starters, schedule, game_period_map)]
+        sps_resting  = [e for e in non_il if is_sp(e) and not has_start(e, scoring_period, probable_starters, schedule, game_period_map)]
 
         total_starts  += len(sps_starting)
         if day_date.weekday() == 6:  # Sunday
@@ -617,7 +693,8 @@ def main():
         # Compute moves
         try:
             moves, skipped_sps, no_slot = optimize_pitchers(
-                entries, scoring_period, schedule, probable_starters, slot_counts
+                entries, scoring_period, schedule, probable_starters, slot_counts,
+                game_period_map
             )
         except Exception as e:
             print(f"  ERROR computing lineup: {e}")

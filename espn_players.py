@@ -23,6 +23,12 @@ from urllib.parse import unquote
 import requests
 from datetime import date
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not installed; rely on environment variables
+
 # ── CONFIGURE THESE ─────────────────────────────────────────────────────────
 # Get your League ID from your leagues URL
 LEAGUE_ID = ""
